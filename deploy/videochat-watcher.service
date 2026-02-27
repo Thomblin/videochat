@@ -1,0 +1,12 @@
+[Unit]
+Description=Restart videochat when binary changes
+After=network.target
+StartLimitIntervalSec=10
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart videochat.service
+
+[Install]
+WantedBy=multi-user.target

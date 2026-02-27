@@ -1,0 +1,33 @@
+# systemd service for videochat
+#
+# Install:
+#   sudo cp deploy/videochat.service /etc/systemd/system/
+#   sudo cp deploy/videochat-watcher.service /etc/systemd/system/
+#   sudo cp deploy/videochat-watcher.path /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now videochat
+#   sudo systemctl enable --now videochat-watcher.path videochat-watcher.service
+
+[Unit]
+Description=Vocabulary Trainer
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/home/www-data/chat.example.de
+
+Environment=PORT=8087
+Environment=NO_TLS=1
+
+ExecStart=/home/www-data/chat.example.de/videochat
+Restart=on-failure
+RestartSec=3s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=videochat
+
+[Install]
+WantedBy=multi-user.target

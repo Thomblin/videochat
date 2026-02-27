@@ -1,0 +1,6 @@
+[Path]
+Unit=videochat-watcher.service
+PathChanged=/home/www-data/chat.example.de/videochat
+
+[Install]
+WantedBy=multi-user.target

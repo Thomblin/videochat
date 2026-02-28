@@ -1,29 +1,44 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
-	"fmt"
 	"log"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"regexp"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
+var allowedOrigin = os.Getenv("ALLOWED_ORIGIN")
+
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		if allowedOrigin == "" {
+			return true
+		}
+		return r.Header.Get("Origin") == allowedOrigin
+	},
 }
+
+var roomPassword = os.Getenv("ROOM_PASSWORD")
+
+var validRoomName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 type Peer struct {
 	ID   string
@@ -94,10 +109,79 @@ func (s *Server) removeFromRoom(p *Peer) {
 	}
 }
 
+// sweepEmptyRooms periodically removes rooms with zero peers.
+func (s *Server) sweepEmptyRooms(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			for name, room := range s.rooms {
+				room.mu.RLock()
+				empty := len(room.peers) == 0
+				room.mu.RUnlock()
+				if empty {
+					delete(s.rooms, name)
+					log.Printf("Swept empty room: %s", name)
+				}
+			}
+			s.mu.Unlock()
+		}
+	}
+}
+
+// broadcastAll sends a message to every connected peer across all rooms.
+func (s *Server) broadcastAll(msg interface{}) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, room := range s.rooms {
+		room.mu.RLock()
+		for _, peer := range room.peers {
+			peer.Send(msg)
+		}
+		room.mu.RUnlock()
+	}
+}
+
+func generatePeerID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return "peer-" + hex.EncodeToString(b)
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	roomName := r.URL.Query().Get("room")
 	if roomName == "" {
 		roomName = "default"
+	}
+
+	// Validate room name
+	if len(roomName) > 64 || !validRoomName.MatchString(roomName) {
+		http.Error(w, "invalid room name", http.StatusBadRequest)
+		return
+	}
+
+	// Check password only when creating a new room (no peers yet)
+	if roomPassword != "" {
+		s.mu.RLock()
+		room, exists := s.rooms[roomName]
+		var occupied bool
+		if exists {
+			room.mu.RLock()
+			occupied = len(room.peers) > 0
+			room.mu.RUnlock()
+		}
+		s.mu.RUnlock()
+
+		if !occupied {
+			if r.URL.Query().Get("password") != roomPassword {
+				http.Error(w, "invalid password", http.StatusUnauthorized)
+				return
+			}
+		}
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -106,9 +190,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peerID := fmt.Sprintf("%d", r.Context().Value(http.LocalAddrContextKey))
-	// Use a simpler unique ID
-	peerID = fmt.Sprintf("peer-%p", conn)
+	peerID := generatePeerID()
 
 	peer := &Peer{ID: peerID, Conn: conn, Room: roomName}
 	room := s.getOrCreateRoom(roomName)
@@ -145,10 +227,29 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[%s] %s left", roomName, peerID)
 	}()
 
+	// Rate limiting: allow bursts up to 200 messages per second
+	const rateLimit = 200
+	msgCount := 0
+	rateTicker := time.NewTicker(time.Second)
+	defer rateTicker.Stop()
+
 	// Relay signaling messages
 	for {
+		// Reset counter each second
+		select {
+		case <-rateTicker.C:
+			msgCount = 0
+		default:
+		}
+
 		var msg map[string]json.RawMessage
 		if err := conn.ReadJSON(&msg); err != nil {
+			break
+		}
+
+		msgCount++
+		if msgCount > rateLimit {
+			log.Printf("[%s] %s exceeded rate limit, disconnecting", roomName, peerID)
 			break
 		}
 
@@ -170,10 +271,38 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Forward the whole message, overwriting peerId with sender's ID
-		msg["peerId"] = json.RawMessage(`"` + peerID + `"`)
+		b, _ := json.Marshal(peerID)
+		msg["peerId"] = json.RawMessage(b)
 		delete(msg, "targetId")
 		target.Send(msg)
 	}
+}
+
+// handleRoomInfo returns whether a room needs a password to join.
+func (s *Server) handleRoomInfo(w http.ResponseWriter, r *http.Request) {
+	roomName := r.URL.Query().Get("room")
+	if roomName == "" {
+		roomName = "default"
+	}
+
+	needsPassword := false
+	if roomPassword != "" {
+		s.mu.RLock()
+		room, exists := s.rooms[roomName]
+		var occupied bool
+		if exists {
+			room.mu.RLock()
+			occupied = len(room.peers) > 0
+			room.mu.RUnlock()
+		}
+		s.mu.RUnlock()
+		needsPassword = !occupied
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"needsPassword": needsPassword,
+	})
 }
 
 const certFile = "cert.pem"
@@ -200,11 +329,16 @@ func getOrCreateCert() (tls.Certificate, error) {
 		return tls.Certificate{}, err
 	}
 
+	// Random serial number per RFC 5280
+	serialBytes := make([]byte, 16)
+	rand.Read(serialBytes)
+	serial := new(big.Int).SetBytes(serialBytes)
+
 	template := x509.Certificate{
-		SerialNumber: big.NewInt(1),
+		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: "videochat"},
 		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour), // 10 years
+		NotAfter:     time.Now().Add(2 * 365 * 24 * time.Hour), // 2 years
 		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
 		DNSNames:     []string{"localhost"},
 	}
@@ -246,6 +380,17 @@ func getOrCreateCert() (tls.Certificate, error) {
 	return tls.X509KeyPair(certPEM, keyPEM)
 }
 
+// securityHeaders wraps an http.Handler to add standard security headers.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' wss: ws:; media-src 'self' blob:; frame-ancestors 'none'")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -257,13 +402,27 @@ func main() {
 	// Leave unset for direct local use — the server will use its own self-signed cert.
 	noTLS := os.Getenv("NO_TLS") == "1"
 
+	if roomPassword != "" {
+		log.Printf("Room password protection enabled")
+	}
+
 	server := NewServer()
+
+	// Start periodic room sweep
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go server.sweepEmptyRooms(ctx, 5*time.Minute)
 
 	staticFS := http.FileServer(http.Dir("static"))
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/ws" {
 			server.handleWS(w, r)
+			return
+		}
+		if r.URL.Path == "/room-info" {
+			server.handleRoomInfo(w, r)
 			return
 		}
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
@@ -279,10 +438,28 @@ func main() {
 		http.ServeFile(w, r, "static/index.html")
 	})
 
+	handler := securityHeaders(mux)
+
+	// Graceful shutdown
+	shutdownCh := make(chan os.Signal, 1)
+	signal.Notify(shutdownCh, syscall.SIGTERM, syscall.SIGINT)
+
 	if noTLS {
 		addr := "127.0.0.1:" + port
+		srv := &http.Server{Addr: addr, Handler: handler}
+		go func() {
+			<-shutdownCh
+			log.Println("Shutting down...")
+			server.broadcastAll(map[string]interface{}{"type": "server-shutdown"})
+			time.Sleep(500 * time.Millisecond)
+			cancel()
+			srv.Shutdown(context.Background())
+		}()
 		log.Printf("Video chat server running on http://%s (plain HTTP, TLS handled by proxy)", addr)
-		log.Fatal(http.ListenAndServe(addr, nil))
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+		return
 	}
 
 	cert, err := getOrCreateCert()
@@ -296,7 +473,19 @@ func main() {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
+	srv := &http.Server{Handler: handler}
+	go func() {
+		<-shutdownCh
+		log.Println("Shutting down...")
+		server.broadcastAll(map[string]interface{}{"type": "server-shutdown"})
+		time.Sleep(500 * time.Millisecond)
+		cancel()
+		srv.Shutdown(context.Background())
+	}()
+
 	log.Printf("Video chat server running on https://localhost:%s", port)
 	log.Printf("On your LAN, open https://<your-pc-ip>:%s (accept the certificate warning)", port)
-	log.Fatal(http.Serve(ln, nil))
+	if err := srv.Serve(ln); err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
 }

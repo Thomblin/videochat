@@ -331,6 +331,18 @@
     outline: none;
   }
   #name-input:focus { border-color: #7b7bff; }
+  #password-input {
+    padding: 10px 16px;
+    border: 1px solid #3a3a5a;
+    border-radius: 8px;
+    background: #16213e;
+    color: #eee;
+    font-size: 1rem;
+    width: 220px;
+    text-align: center;
+    outline: none;
+  }
+  #password-input:focus { border-color: #7b7bff; }
   #join-btn {
     padding: 12px 36px;
     border: none;
@@ -357,7 +369,10 @@
     <h2>Ready to join?</h2>
     <input id="name-input" type="text" placeholder="Your name (optional)" maxlength="32"
            onkeydown="if(event.key==='Enter') joinRoom()">
+    <input id="password-input" type="password" placeholder="Room password" maxlength="64"
+           onkeydown="if(event.key==='Enter') joinRoom()" class="hidden">
     <p class="note">Camera &amp; mic access will be requested.<br>You can join without them if denied.</p>
+    <p id="error-msg" class="note" style="color:#e74c3c;display:none"></p>
     <button id="join-btn" onclick="joinRoom()">Join Room</button>
   </div>
 
@@ -405,6 +420,16 @@ if (!roomName) {
   location.href = '/' + Math.random().toString(36).substring(2, 8);
 }
 document.getElementById('room-name').textContent = roomName;
+
+// Check if the room needs a password and show/hide the field accordingly
+fetch(`/room-info?room=${encodeURIComponent(roomName)}`)
+  .then(r => r.json())
+  .then(info => {
+    if (info.needsPassword) {
+      document.getElementById('password-input').classList.remove('hidden');
+    }
+  })
+  .catch(() => {});
 
 let ws;
 let localStream;
@@ -481,7 +506,10 @@ async function joinRoom() {
 
 function connectSignaling() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}/ws?room=${encodeURIComponent(roomName)}`);
+  const passwordVal = document.getElementById('password-input').value;
+  let wsUrl = `${proto}//${location.host}/ws?room=${encodeURIComponent(roomName)}`;
+  if (passwordVal) wsUrl += `&password=${encodeURIComponent(passwordVal)}`;
+  ws = new WebSocket(wsUrl);
   ws.onopen = () => console.log('WS connected');
 
   ws.onmessage = (event) => {
@@ -527,10 +555,26 @@ function connectSignaling() {
       case 'chat':
         receiveChat(msg.peerId, msg.text);
         break;
+      case 'server-shutdown':
+        appendSystemMsg('Server is shutting down...');
+        break;
     }
   };
 
-  ws.onclose = () => console.log('WS closed');
+  ws.onclose = (e) => {
+    console.log('WS closed', e.code, e.reason);
+    // If connection was rejected (never opened successfully), likely bad password
+    if (!myId && e.code !== 1000) {
+      showError('Connection rejected. Check the room password.');
+      leaveRoom();
+    }
+  };
+}
+
+function showError(text) {
+  const el = document.getElementById('error-msg');
+  el.textContent = text;
+  el.style.display = 'block';
 }
 
 function broadcastToAll(obj) {

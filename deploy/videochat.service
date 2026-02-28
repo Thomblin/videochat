@@ -9,7 +9,7 @@
 #   sudo systemctl enable --now videochat-watcher.path videochat-watcher.service
 
 [Unit]
-Description=Vocabulary Trainer
+Description=Videochat
 After=network.target
 
 [Service]
@@ -20,6 +20,8 @@ WorkingDirectory=/home/www-data/chat.example.de
 
 Environment=PORT=8087
 Environment=NO_TLS=1
+#Environment=ALLOWED_ORIGIN=https://chat.example.de
+#Environment=ROOM_PASSWORD=changeme
 
 ExecStart=/home/www-data/chat.example.de/videochat
 Restart=on-failure
@@ -28,6 +30,14 @@ RestartSec=3s
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=videochat
+
+# Hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/home/www-data/chat.example.de
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

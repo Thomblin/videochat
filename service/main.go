@@ -46,7 +46,7 @@ func main() {
 	defer cancel()
 	go server.sweepEmptyRooms(ctx, 5*time.Minute)
 
-	staticFS := http.FileServer(http.Dir("static"))
+	staticFS := http.FileServer(http.Dir("www/static"))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +59,7 @@ func main() {
 			return
 		}
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
-			http.ServeFile(w, r, "static/index.html")
+			http.ServeFile(w, r, "www/static/index.html")
 			return
 		}
 		for _, ext := range []string{".js", ".css", ".ico", ".png", ".svg"} {
@@ -68,7 +68,7 @@ func main() {
 				return
 			}
 		}
-		http.ServeFile(w, r, "static/index.html")
+		http.ServeFile(w, r, "www/static/index.html")
 	})
 
 	handler := securityHeaders(mux)

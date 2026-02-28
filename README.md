@@ -15,7 +15,7 @@ Peer-to-peer video chat in the browser. Go signaling server + vanilla HTML/JS �
 ## Quick Start (local)
 
 ```bash
-go build -o videochat .
+go build -o videochat ./service
 ./videochat
 ```
 
@@ -40,7 +40,7 @@ Copy `.env.example` to `.env` and set `RSYNC_DEST` (e.g. `user@raspberry:/home/w
 make release
 ```
 
-This cross-compiles for `linux/arm64` and rsyncs the binary + `static/` to the target.
+This cross-compiles for `linux/arm64` and rsyncs the binary + `www/` to the target.
 
 ### 2. systemd service
 
@@ -77,7 +77,7 @@ The nginx config proxies HTTPS → `http://127.0.0.1:<PORT>` and includes the We
 ## Limitations
 
 - **Mesh topology**: Works well up to ~4–6 participants. Beyond that, upload bandwidth and CPU grow linearly (each peer sends their stream to every other peer). For larger groups, a selective forwarding unit (SFU) like mediasoup or LiveKit would be needed.
-- **No TURN server**: Peers behind strict NATs (~10–20% of networks) may fail to connect. For production, add a TURN server to `ICE_SERVERS` in `static/index.html`:
+- **No TURN server**: Peers behind strict NATs (~10–20% of networks) may fail to connect. For production, add a TURN server to `ICE_SERVERS` in `www/static/app.js`:
 
 ```js
 const ICE_SERVERS = [

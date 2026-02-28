@@ -2,3 +2,4 @@
 *.pem
 videochat
 .claude
+www/node_modules/

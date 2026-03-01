@@ -4,12 +4,14 @@
 -include .env
 export
 
+SERVICE_SRC := $(wildcard service/*) go.mod go.sum $(wildcard www/static/*)
+
 ## build: compile the Go binary
-build:
+build: $(SERVICE_SRC)
 	go build -o videochat ./service
 
 ## run: start the app
-run:
+run: build
 	./videochat
 
 ## test: run all tests

@@ -17,7 +17,7 @@ const peerNames = {};
 const peerMediaState = {};
 
 let screenStream = null;
-let screenSharerId = null;
+const screenSharerIds = new Set();
 
 let chatOpen = false;
 let unreadCount = 0;
@@ -398,7 +398,7 @@ async function joinRoom() {
   document.getElementById('main').classList.remove('hidden');
   document.getElementById('toolbar').classList.add('visible');
   document.getElementById('video-grid').classList.remove('hidden');
-  document.getElementById('screen-layout').classList.add('hidden');
+  document.getElementById('pinned-layout').classList.add('hidden');
   if (!hasCam) document.getElementById('btn-cam').disabled = true;
   if (!hasMic) document.getElementById('btn-mic').disabled = true;
 
@@ -463,6 +463,17 @@ function connectSignaling() {
         if (myName) broadcastToAll({ type: 'name', name: myName });
         // Send current media state to all peers
         broadcastToAll({ type: 'media-state', audio: micEnabled, video: camEnabled });
+        // If we're screen sharing, notify all peers and add screen track
+        if (screenStream) {
+          broadcastToAll({ type: 'screen-share-start' });
+          const screenTrack = screenStream.getVideoTracks()[0];
+          if (screenTrack && screenTrack.readyState === 'live') {
+            for (const [, peer] of Object.entries(peers)) {
+              const alreadyAdded = peer.pc.getSenders().some(s => s.track === screenTrack);
+              if (!alreadyAdded) peer.pc.addTrack(screenTrack, screenStream);
+            }
+          }
+        }
         break;
       case 'name':
         peerNames[msg.peerId] = msg.name;
@@ -473,6 +484,10 @@ function connectSignaling() {
           ws.send(JSON.stringify({ type: 'name', targetId: msg.peerId, name: myName }));
         // Send media state to new peer
         ws.send(JSON.stringify({ type: 'media-state', targetId: msg.peerId, audio: micEnabled, video: camEnabled }));
+        // If we're screen sharing, notify the new peer
+        if (screenStream) {
+          ws.send(JSON.stringify({ type: 'screen-share-start', targetId: msg.peerId }));
+        }
         appendSystemMsg(displayName(msg.peerId) + ' joined');
         playNotification('join');
         break;
@@ -480,22 +495,28 @@ function connectSignaling() {
       case 'answer':  handleAnswer(msg.peerId, msg.sdp); break;
       case 'ice':     handleICE(msg.peerId, msg.ice); break;
       case 'peer-left':
-        if (screenSharerId === msg.peerId) { screenSharerId = null; revertLayout(); }
+        screenSharerIds.delete(msg.peerId);
+        removeRemoteScreen(msg.peerId);
         appendSystemMsg(displayName(msg.peerId) + ' left');
         removePeer(msg.peerId);
         break;
       case 'screen-share-start':
-        screenSharerId = msg.peerId;
+        screenSharerIds.add(msg.peerId);
         updateScreenBtn();
+        // If the track already arrived, the tile may already exist — ensure it's pinned
         if (peers[msg.peerId]?.screenStream?.getVideoTracks().length > 0) {
-          applyRemoteScreenLayout(msg.peerId, peers[msg.peerId].screenStream);
+          const label = displayName(msg.peerId) + "'s screen";
+          const container = addVideoElement('screen-' + msg.peerId, peers[msg.peerId].screenStream, label);
+          if (container) {
+            container.classList.add('screen-tile');
+            if (!container.classList.contains('pinned')) pinTile(container);
+          }
         }
         break;
       case 'screen-share-stop':
-        screenSharerId = null;
+        screenSharerIds.delete(msg.peerId);
         updateScreenBtn();
         removeRemoteScreen(msg.peerId);
-        revertLayout();
         break;
       case 'chat':
         receiveChat(msg.peerId, msg.text);
@@ -552,6 +573,12 @@ function attemptReconnect() {
       document.getElementById('video-' + peerId)?.remove();
       document.getElementById('video-screen-' + peerId)?.remove();
     }
+    screenSharerIds.clear();
+    // Reset pinned layout
+    document.getElementById('pinned-area').innerHTML = '';
+    document.getElementById('tile-strip').innerHTML = '';
+    document.getElementById('pinned-layout').classList.add('hidden');
+    document.getElementById('video-grid').classList.remove('hidden');
     connectSignaling();
   }, delay);
 }
@@ -577,7 +604,14 @@ function manualReconnect() {
     peers[peerId].pc.close();
     delete peers[peerId];
     document.getElementById('video-' + peerId)?.remove();
+    document.getElementById('video-screen-' + peerId)?.remove();
   }
+  screenSharerIds.clear();
+  // Reset pinned layout
+  document.getElementById('pinned-area').innerHTML = '';
+  document.getElementById('tile-strip').innerHTML = '';
+  document.getElementById('pinned-layout').classList.add('hidden');
+  document.getElementById('video-grid').classList.remove('hidden');
   connectSignaling();
 }
 
@@ -637,24 +671,38 @@ function createPeerConnection(peerId, shouldOffer) {
     const incomingStreamId = (event.streams && event.streams[0]) ? event.streams[0].id : null;
     console.log(`[${shortId(peerId)}] ontrack kind=${track.kind} streamId=${incomingStreamId} camStreamId=${peer.camStreamId}`);
 
-    // If streams are not provided (WebView), treat all tracks as camera
     const noStreams = !event.streams || event.streams.length === 0;
 
     if (peer.camStreamId === null && incomingStreamId !== null) {
       peer.camStreamId = incomingStreamId;
     }
 
-    if (noStreams || incomingStreamId === peer.camStreamId) {
-      peer.camStream.addTrack(track);
-      addVideoElement(peerId, peer.camStream, displayName(peerId));
-      if (peerMediaState[peerId]) updateMediaIndicators(peerId);
-    } else {
+    // Determine if this is a screen track:
+    // 1. Stream ID differs from camera stream ID (normal case), OR
+    // 2. No streams provided AND we already have a video track on the camera
+    //    (e.g. Firefox/Chrome Android don't always relay stream associations)
+    const hasCamVideo = peer.camStream.getVideoTracks().length > 0;
+    const isScreenTrack = (incomingStreamId !== null && incomingStreamId !== peer.camStreamId)
+      || (noStreams && track.kind === 'video' && hasCamVideo);
+
+    if (isScreenTrack) {
       peer.screenStream.getTracks()
         .filter(t => t.kind === track.kind)
         .forEach(t => peer.screenStream.removeTrack(t));
       peer.screenStream.addTrack(track);
-      console.log(`[${shortId(peerId)}] screen track received, sharerId=${screenSharerId}`);
-      if (screenSharerId === peerId) applyRemoteScreenLayout(peerId, peer.screenStream);
+      console.log(`[${shortId(peerId)}] screen track received, sharerIds=${[...screenSharerIds]}`);
+      // Always create and pin the screen tile — track may arrive before or after the signal
+      screenSharerIds.add(peerId);
+      const label = displayName(peerId) + "'s screen";
+      const container = addVideoElement('screen-' + peerId, peer.screenStream, label);
+      if (container) {
+        container.classList.add('screen-tile');
+        if (!container.classList.contains('pinned')) pinTile(container);
+      }
+    } else {
+      peer.camStream.addTrack(track);
+      addVideoElement(peerId, peer.camStream, displayName(peerId));
+      if (peerMediaState[peerId]) updateMediaIndicators(peerId);
     }
   };
 
@@ -729,6 +777,16 @@ async function handleOffer(peerId, sdp) {
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
   ws.send(JSON.stringify({ type: 'answer', targetId: peerId, sdp: pc.localDescription }));
+
+  // If we're screen sharing, add the screen track now (after initial negotiation).
+  // This triggers onnegotiationneeded → a new offer with the screen track.
+  if (screenStream) {
+    const screenTrack = screenStream.getVideoTracks()[0];
+    if (screenTrack && screenTrack.readyState === 'live') {
+      const alreadyAdded = pc.getSenders().some(s => s.track === screenTrack);
+      if (!alreadyAdded) pc.addTrack(screenTrack, screenStream);
+    }
+  }
 }
 
 async function handleAnswer(peerId, sdp) {
@@ -753,7 +811,7 @@ function removePeer(peerId) {
   delete peerNames[peerId];
   delete guestNumbers[peerId];
   delete prevAudioEnergy[peerId];
-  updateGrid();
+  updateLayout();
 }
 
 // ── Connection quality (Prompt 11) ──────────────────────────────────────────
@@ -829,8 +887,15 @@ async function startScreenShare() {
     peer.pc.addTrack(screenTrack, stream);
 
   broadcastToAll({ type: 'screen-share-start' });
-  screenSharerId = myId;
-  applyLocalScreenLayout(stream);
+  screenSharerIds.add(myId);
+
+  // Create a video tile for the local screen share and auto-pin it
+  const label = (myName || 'Your') + "'s screen";
+  const container = addVideoElement('screen-' + myId, stream, label, true);
+  if (container) {
+    container.classList.add('screen-tile');
+    pinTile(container);
+  }
   updateScreenBtn();
 }
 
@@ -848,9 +913,15 @@ async function stopScreenShare() {
 
   screenStream.getTracks().forEach(t => t.stop());
   screenStream = null;
-  screenSharerId = null;
+  screenSharerIds.delete(myId);
   broadcastToAll({ type: 'screen-share-stop' });
-  revertLayout();
+  // Remove the screen share tile
+  const screenContainer = document.getElementById('video-screen-' + myId);
+  if (screenContainer) {
+    screenContainer.classList.remove('pinned');
+    screenContainer.remove();
+  }
+  updateLayout();
   updateScreenBtn();
 }
 
@@ -859,15 +930,18 @@ function toggleScreenShare() { screenStream ? stopScreenShare() : startScreenSha
 function updateScreenBtn() {
   const btn = document.getElementById('btn-screen');
   const iAmSharing = screenStream !== null;
-  const someoneElseSharing = screenSharerId !== null && screenSharerId !== myId;
   setBtnContent(btn, iAmSharing ? '⏹' : '🖥️', iAmSharing ? 'Stop' : 'Share');
   btn.classList.toggle('active', iAmSharing);
-  btn.disabled = someoneElseSharing;
 }
 
 function removeRemoteScreen(peerId) {
-  document.getElementById('video-screen-' + peerId)?.remove();
+  const container = document.getElementById('video-screen-' + peerId);
+  if (container) {
+    container.classList.remove('pinned');
+    container.remove();
+  }
   if (peers[peerId]) peers[peerId].screenStream = null;
+  updateLayout();
 }
 
 // ── Chat ────────────────────────────────────────────────────────────────────
@@ -1046,17 +1120,18 @@ function handleReaction(peerId, emoji, raised) {
   container.appendChild(float);
   setTimeout(() => float.remove(), 3000);
 
-  // Also show on the screen-share featured area if active
-  const screenFeatured = document.getElementById('screen-featured');
-  const screenLayout = document.getElementById('screen-layout');
-  if (screenFeatured && screenLayout && !screenLayout.classList.contains('hidden')) {
-    const screenFloat = document.createElement('div');
-    screenFloat.className = 'reaction-float';
-    screenFloat.textContent = emoji;
-    screenFloat.style.left = (8 + Math.random() * 60) + 'px';
-    screenFloat.style.bottom = (8 + Math.random() * 30) + 'px';
-    screenFeatured.appendChild(screenFloat);
-    setTimeout(() => screenFloat.remove(), 3000);
+  // Also show on pinned tiles if active
+  const pinnedLayout = document.getElementById('pinned-layout');
+  if (pinnedLayout && !pinnedLayout.classList.contains('hidden')) {
+    document.querySelectorAll('#pinned-area .video-container').forEach(pinnedTile => {
+      const pinnedFloat = document.createElement('div');
+      pinnedFloat.className = 'reaction-float';
+      pinnedFloat.textContent = emoji;
+      pinnedFloat.style.left = (8 + Math.random() * 60) + 'px';
+      pinnedFloat.style.bottom = (8 + Math.random() * 30) + 'px';
+      pinnedTile.appendChild(pinnedFloat);
+      setTimeout(() => pinnedFloat.remove(), 3000);
+    });
   }
 }
 
@@ -1094,34 +1169,43 @@ function updateMediaIndicators(peerId) {
 
 // ── Layout ──────────────────────────────────────────────────────────────────
 
-function applyLocalScreenLayout(stream) {
-  document.getElementById('video-grid').classList.add('hidden');
-  document.getElementById('screen-layout').classList.remove('hidden');
-  document.getElementById('screen-video').srcObject = stream;
-  document.getElementById('screen-label').textContent = (myName || 'Your') + "'s screen";
-  const strip = document.getElementById('tile-strip');
-  strip.innerHTML = '';
-  document.querySelectorAll('#video-grid .video-container').forEach(el => strip.appendChild(el));
+function pinTile(container) {
+  if (typeof container === 'string') container = document.getElementById(container);
+  if (!container || container.classList.contains('pinned')) return;
+  container.classList.add('pinned');
+  const pinnedArea = document.getElementById('pinned-area');
+  pinnedArea.appendChild(container);
+  updateLayout();
 }
 
-function applyRemoteScreenLayout(peerId, stream) {
-  document.getElementById('video-grid').classList.add('hidden');
-  document.getElementById('screen-layout').classList.remove('hidden');
-  document.getElementById('screen-video').srcObject = stream;
-  const label = displayName(peerId);
-  document.getElementById('screen-label').textContent = label + "'s screen";
+function unpinTile(container) {
+  if (typeof container === 'string') container = document.getElementById(container);
+  if (!container || !container.classList.contains('pinned')) return;
+  container.classList.remove('pinned');
   const strip = document.getElementById('tile-strip');
-  strip.innerHTML = '';
-  document.querySelectorAll('#video-grid .video-container').forEach(el => strip.appendChild(el));
+  strip.appendChild(container);
+  updateLayout();
 }
 
-function revertLayout() {
-  document.getElementById('screen-video').srcObject = null;
+function updateLayout() {
+  const pinnedArea = document.getElementById('pinned-area');
+  const pinnedCount = pinnedArea.querySelectorAll('.video-container').length;
   const grid = document.getElementById('video-grid');
-  document.querySelectorAll('#tile-strip .video-container').forEach(el => grid.appendChild(el));
-  document.getElementById('screen-layout').classList.add('hidden');
-  grid.classList.remove('hidden');
-  updateGrid();
+  const pinnedLayout = document.getElementById('pinned-layout');
+
+  if (pinnedCount > 0) {
+    // Move any remaining grid tiles to the tile strip
+    const strip = document.getElementById('tile-strip');
+    document.querySelectorAll('#video-grid .video-container').forEach(el => strip.appendChild(el));
+    grid.classList.add('hidden');
+    pinnedLayout.classList.remove('hidden');
+  } else {
+    // Move all tiles back to grid
+    document.querySelectorAll('#tile-strip .video-container').forEach(el => grid.appendChild(el));
+    pinnedLayout.classList.add('hidden');
+    grid.classList.remove('hidden');
+    updateGrid();
+  }
 }
 
 // ── UI helpers ──────────────────────────────────────────────────────────────
@@ -1141,7 +1225,7 @@ function updatePeerLabel(peerId) {
 }
 
 function addVideoElement(id, stream, label, muted = false) {
-  if (document.getElementById('video-' + id)) return;
+  if (document.getElementById('video-' + id)) return document.getElementById('video-' + id);
 
   const container = document.createElement('div');
   container.className = 'video-container';
@@ -1156,10 +1240,10 @@ function addVideoElement(id, stream, label, muted = false) {
   if (muted) video.muted = true;
   video.srcObject = stream;
 
-  // Double-click for fullscreen (Prompt 16)
+  // Double-click to pin/unpin
   video.addEventListener('dblclick', () => {
-    if (container.requestFullscreen) container.requestFullscreen();
-    else if (container.webkitRequestFullscreen) container.webkitRequestFullscreen();
+    if (container.classList.contains('pinned')) unpinTile(container);
+    else pinTile(container);
   });
 
   const labelEl = document.createElement('div');
@@ -1182,7 +1266,19 @@ function addVideoElement(id, stream, label, muted = false) {
     container.appendChild(pipBtn);
   }
 
-  const inScreenLayout = !document.getElementById('screen-layout').classList.contains('hidden');
+  // Pin button
+  const pinBtn = document.createElement('button');
+  pinBtn.className = 'pin-btn';
+  pinBtn.textContent = '📌';
+  pinBtn.title = 'Pin / Unpin';
+  pinBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (container.classList.contains('pinned')) unpinTile(container);
+    else pinTile(container);
+  });
+  container.appendChild(pinBtn);
+
+  const inScreenLayout = !document.getElementById('pinned-layout').classList.contains('hidden');
   if (inScreenLayout) {
     document.getElementById('tile-strip').appendChild(container);
   } else {
@@ -1193,6 +1289,8 @@ function addVideoElement(id, stream, label, muted = false) {
   // Play after DOM insertion (WebView compat)
   video.play().catch(() => {});
   stream.addEventListener('addtrack', () => { video.play().catch(() => {}); });
+
+  return container;
 }
 
 function updateGrid() {
@@ -1284,6 +1382,7 @@ function leaveRoom() {
   for (const k in peerMediaState) delete peerMediaState[k];
   for (const k in guestNumbers) delete guestNumbers[k];
   guestCounter = 0;
+  screenSharerIds.clear();
   chatOpen = false;
   unreadCount = 0;
   handRaised = false;
@@ -1299,8 +1398,9 @@ function leaveRoom() {
   document.getElementById('video-grid').innerHTML = '';
   document.getElementById('video-grid').classList.remove('hidden');
   document.getElementById('tile-strip').innerHTML = '';
+  document.getElementById('pinned-area').innerHTML = '';
   document.getElementById('main').classList.add('hidden');
-  document.getElementById('screen-layout').classList.add('hidden');
+  document.getElementById('pinned-layout').classList.add('hidden');
   document.getElementById('toolbar').classList.remove('visible');
   document.getElementById('btn-cam').disabled = false;
   document.getElementById('btn-mic').disabled = false;

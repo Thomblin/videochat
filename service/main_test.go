@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,8 +35,19 @@ func TestSecurityHeaders(t *testing.T) {
 	if !strings.Contains(csp, "default-src 'self'") {
 		t.Errorf("CSP missing default-src 'self': %q", csp)
 	}
-	if !strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
+	if !strings.Contains(csp, "script-src 'self'") {
 		t.Errorf("CSP missing script-src: %q", csp)
+	}
+	if strings.Contains(csp, "'unsafe-inline'") && strings.Contains(csp, "script-src") {
+		// Check that script-src does NOT have unsafe-inline
+		// style-src may still have it
+		parts := strings.Split(csp, ";")
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if strings.HasPrefix(p, "script-src") && strings.Contains(p, "'unsafe-inline'") {
+				t.Errorf("script-src should not contain 'unsafe-inline': %q", csp)
+			}
+		}
 	}
 	if !strings.Contains(csp, "frame-ancestors 'none'") {
 		t.Errorf("CSP missing frame-ancestors: %q", csp)
@@ -60,6 +72,10 @@ func TestRouting(t *testing.T) {
 		}
 		if r.URL.Path == "/room-info" {
 			server.handleRoomInfo(w, r)
+			return
+		}
+		if r.URL.Path == "/config" {
+			handleConfig(w, r)
 			return
 		}
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
@@ -144,6 +160,73 @@ func TestRouting(t *testing.T) {
 		ct := resp.Header.Get("Content-Type")
 		if !strings.Contains(ct, "application/json") {
 			t.Fatalf("expected JSON content type, got %q", ct)
+		}
+	})
+}
+
+func TestConfigEndpoint(t *testing.T) {
+	t.Run("returns default ICE servers when env unset", func(t *testing.T) {
+		orig := os.Getenv("ICE_SERVERS")
+		os.Unsetenv("ICE_SERVERS")
+		defer os.Setenv("ICE_SERVERS", orig)
+
+		req := httptest.NewRequest("GET", "/config", nil)
+		rec := httptest.NewRecorder()
+		handleConfig(rec, req)
+
+		if rec.Code != 200 {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		var result map[string]json.RawMessage
+		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+		if _, ok := result["iceServers"]; !ok {
+			t.Fatal("response missing iceServers field")
+		}
+		var servers []map[string]interface{}
+		json.Unmarshal(result["iceServers"], &servers)
+		if len(servers) != 2 {
+			t.Fatalf("expected 2 default servers, got %d", len(servers))
+		}
+	})
+
+	t.Run("returns custom ICE servers from env", func(t *testing.T) {
+		orig := os.Getenv("ICE_SERVERS")
+		os.Setenv("ICE_SERVERS", `[{"urls":"turn:example.com:3478","username":"u","credential":"p"}]`)
+		defer os.Setenv("ICE_SERVERS", orig)
+
+		req := httptest.NewRequest("GET", "/config", nil)
+		rec := httptest.NewRecorder()
+		handleConfig(rec, req)
+
+		var result map[string]json.RawMessage
+		json.Unmarshal(rec.Body.Bytes(), &result)
+		var servers []map[string]interface{}
+		json.Unmarshal(result["iceServers"], &servers)
+		if len(servers) != 1 {
+			t.Fatalf("expected 1 server, got %d", len(servers))
+		}
+		if servers[0]["urls"] != "turn:example.com:3478" {
+			t.Fatalf("unexpected server URL: %v", servers[0]["urls"])
+		}
+	})
+
+	t.Run("falls back to default on invalid JSON", func(t *testing.T) {
+		orig := os.Getenv("ICE_SERVERS")
+		os.Setenv("ICE_SERVERS", "not valid json")
+		defer os.Setenv("ICE_SERVERS", orig)
+
+		req := httptest.NewRequest("GET", "/config", nil)
+		rec := httptest.NewRecorder()
+		handleConfig(rec, req)
+
+		var result map[string]json.RawMessage
+		json.Unmarshal(rec.Body.Bytes(), &result)
+		var servers []map[string]interface{}
+		json.Unmarshal(result["iceServers"], &servers)
+		if len(servers) != 2 {
+			t.Fatalf("expected 2 default servers on invalid JSON, got %d", len(servers))
 		}
 	})
 }

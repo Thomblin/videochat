@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -13,13 +14,29 @@ import (
 
 var allowedOrigin = os.Getenv("ALLOWED_ORIGIN")
 
+var defaultICEServers = `[{"urls":"stun:stun.l.google.com:19302"},{"urls":"stun:stun1.l.google.com:19302"}]`
+
+func handleConfig(w http.ResponseWriter, r *http.Request) {
+	iceServers := os.Getenv("ICE_SERVERS")
+	if iceServers == "" {
+		iceServers = defaultICEServers
+	}
+	// Validate it's valid JSON
+	var parsed json.RawMessage
+	if json.Unmarshal([]byte(iceServers), &parsed) != nil {
+		iceServers = defaultICEServers
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"iceServers":` + iceServers + `}`))
+}
+
 // securityHeaders wraps an http.Handler to add standard security headers.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws:; media-src 'self' blob:; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws:; media-src 'self' blob:; frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -56,6 +73,10 @@ func main() {
 		}
 		if r.URL.Path == "/room-info" {
 			server.handleRoomInfo(w, r)
+			return
+		}
+		if r.URL.Path == "/config" {
+			handleConfig(w, r)
 			return
 		}
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {

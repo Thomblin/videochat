@@ -44,6 +44,10 @@ func setupTestServer(t *testing.T, password string) (*Server, *httptest.Server) 
 			server.handleRoomInfo(w, r)
 			return
 		}
+		if r.URL.Path == "/config" {
+			handleConfig(w, r)
+			return
+		}
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 			http.ServeFile(w, r, tmpDir+"/index.html")
 			return
@@ -70,7 +74,41 @@ func writeFile(t *testing.T, path, content string) {
 }
 
 // dialWS connects to the test server's /ws endpoint.
+// If the query contains "password=", it strips the password from the URL
+// and sends it as an auth message after connection (matching the new auth flow).
 func dialWS(t *testing.T, ts *httptest.Server, query string) *websocket.Conn {
+	t.Helper()
+
+	// Extract password from query if present
+	var password string
+	parts := strings.Split(query, "&")
+	var cleanParts []string
+	for _, p := range parts {
+		if strings.HasPrefix(p, "password=") {
+			password = strings.TrimPrefix(p, "password=")
+		} else {
+			cleanParts = append(cleanParts, p)
+		}
+	}
+	cleanQuery := strings.Join(cleanParts, "&")
+
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?" + cleanQuery
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	// Send auth message if password was provided
+	if password != "" {
+		conn.WriteJSON(map[string]string{"type": "auth", "password": password})
+	}
+
+	return conn
+}
+
+// dialWSRaw connects without sending auth — for testing auth failures.
+func dialWSRaw(t *testing.T, ts *httptest.Server, query string) *websocket.Conn {
 	t.Helper()
 	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?" + query
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
@@ -145,17 +183,23 @@ func TestHandleWS_InvalidRoom(t *testing.T) {
 func TestHandleWS_PasswordProtection(t *testing.T) {
 	_, ts := setupTestServer(t, "secret")
 
-	t.Run("rejected without password", func(t *testing.T) {
-		code := dialWSExpectFail(t, ts, "room=pwtest1")
-		if code != http.StatusUnauthorized {
-			t.Fatalf("expected 401, got %d", code)
+	t.Run("rejected without auth message", func(t *testing.T) {
+		conn := dialWSRaw(t, ts, "room=pwtest1")
+		// Should be closed by server after timeout or immediately
+		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		_, _, err := conn.ReadMessage()
+		if err == nil {
+			t.Fatal("expected connection to be closed")
 		}
 	})
 
 	t.Run("rejected with wrong password", func(t *testing.T) {
-		code := dialWSExpectFail(t, ts, "room=pwtest2&password=wrong")
-		if code != http.StatusUnauthorized {
-			t.Fatalf("expected 401, got %d", code)
+		conn := dialWSRaw(t, ts, "room=pwtest2")
+		conn.WriteJSON(map[string]string{"type": "auth", "password": "wrong"})
+		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		_, _, err := conn.ReadMessage()
+		if err == nil {
+			t.Fatal("expected connection to be closed")
 		}
 	})
 
@@ -491,6 +535,71 @@ func TestHandleRoomInfo(t *testing.T) {
 		json.NewDecoder(resp.Body).Decode(&info)
 		if _, ok := info["needsPassword"]; !ok {
 			t.Fatal("response should contain needsPassword field")
+		}
+	})
+
+	t.Run("returns peer count and names", func(t *testing.T) {
+		_, ts := setupTestServer(t, "")
+
+		// Join a peer
+		conn := dialWS(t, ts, "room=lobbytest")
+		msg := readMsg(t, conn)
+		if msg["type"] != "welcome" {
+			t.Fatalf("expected welcome, got %v", msg["type"])
+		}
+		peer1ID, _ := msg["yourId"].(string)
+
+		// Send a name message (need a second peer as target for relay)
+		conn2 := dialWS(t, ts, "room=lobbytest")
+		msg2 := readMsg(t, conn2)
+		if msg2["type"] != "welcome" {
+			t.Fatalf("expected welcome, got %v", msg2["type"])
+		}
+		peer2ID, _ := msg2["yourId"].(string)
+		_ = peer1ID
+
+		// Drain peer-joined on conn1
+		readMsg(t, conn)
+
+		// Send name from conn1 to conn2 (server tracks the name)
+		conn.WriteJSON(map[string]interface{}{
+			"type":     "name",
+			"targetId": peer2ID,
+			"name":     "Alice",
+		})
+		// Wait for relay
+		readMsg(t, conn2)
+
+		// Give server a moment to process
+		time.Sleep(50 * time.Millisecond)
+
+		// Check room info
+		resp, err := http.Get(ts.URL + "/room-info?room=lobbytest")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+
+		var info map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&info)
+
+		peerCount, _ := info["peerCount"].(float64)
+		if peerCount != 2 {
+			t.Fatalf("expected peerCount=2, got %v", info["peerCount"])
+		}
+
+		peerNames, _ := info["peerNames"].([]interface{})
+		if len(peerNames) < 1 {
+			t.Fatalf("expected at least 1 peer name, got %v", peerNames)
+		}
+		found := false
+		for _, n := range peerNames {
+			if n == "Alice" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected to find 'Alice' in peer names, got %v", peerNames)
 		}
 	})
 }

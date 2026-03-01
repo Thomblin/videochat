@@ -15,6 +15,7 @@ type Peer struct {
 	ID   string
 	Conn *websocket.Conn
 	Room string
+	Name string
 	mu   sync.Mutex
 }
 

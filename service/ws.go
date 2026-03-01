@@ -36,30 +36,36 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check password only when creating a new room (no peers yet)
-	if roomPassword != "" {
-		s.mu.RLock()
-		room, exists := s.rooms[roomName]
-		var occupied bool
-		if exists {
-			room.mu.RLock()
-			occupied = len(room.peers) > 0
-			room.mu.RUnlock()
-		}
-		s.mu.RUnlock()
-
-		if !occupied {
-			if r.URL.Query().Get("password") != roomPassword {
-				http.Error(w, "invalid password", http.StatusUnauthorized)
-				return
-			}
-		}
-	}
-
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("upgrade error: %v", err)
 		return
+	}
+
+	// Check password only when creating a new room (no peers yet)
+	if roomPassword != "" {
+		s.mu.RLock()
+		existingRoom, exists := s.rooms[roomName]
+		var occupied bool
+		if exists {
+			existingRoom.mu.RLock()
+			occupied = len(existingRoom.peers) > 0
+			existingRoom.mu.RUnlock()
+		}
+		s.mu.RUnlock()
+
+		if !occupied {
+			// Read first message as auth
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			var authMsg map[string]string
+			if err := conn.ReadJSON(&authMsg); err != nil || authMsg["type"] != "auth" || authMsg["password"] != roomPassword {
+				conn.WriteMessage(websocket.CloseMessage,
+					websocket.FormatCloseMessage(4001, "invalid password"))
+				conn.Close()
+				return
+			}
+			conn.SetReadDeadline(time.Time{}) // clear deadline
+		}
 	}
 
 	peerID := generatePeerID()
@@ -142,6 +148,21 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Track peer name if this is a name message
+		if typeBytes, ok := msg["type"]; ok {
+			var msgType string
+			if json.Unmarshal(typeBytes, &msgType) == nil && msgType == "name" {
+				if nameBytes, ok := msg["name"]; ok {
+					var name string
+					if json.Unmarshal(nameBytes, &name) == nil {
+						peer.mu.Lock()
+						peer.Name = name
+						peer.mu.Unlock()
+					}
+				}
+			}
+		}
+
 		// Forward the whole message, overwriting peerId with sender's ID
 		b, _ := json.Marshal(peerID)
 		msg["peerId"] = json.RawMessage(b)
@@ -150,7 +171,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleRoomInfo returns whether a room needs a password to join.
+// handleRoomInfo returns whether a room needs a password, plus peer count and names.
 func (s *Server) handleRoomInfo(w http.ResponseWriter, r *http.Request) {
 	roomName := r.URL.Query().Get("room")
 	if roomName == "" {
@@ -158,21 +179,34 @@ func (s *Server) handleRoomInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	needsPassword := false
-	if roomPassword != "" {
-		s.mu.RLock()
-		room, exists := s.rooms[roomName]
-		var occupied bool
-		if exists {
-			room.mu.RLock()
-			occupied = len(room.peers) > 0
-			room.mu.RUnlock()
+	peerCount := 0
+	var peerNames []string
+
+	s.mu.RLock()
+	room, exists := s.rooms[roomName]
+	if exists {
+		room.mu.RLock()
+		peerCount = len(room.peers)
+		peerNames = make([]string, 0, peerCount)
+		for _, p := range room.peers {
+			p.mu.Lock()
+			if p.Name != "" {
+				peerNames = append(peerNames, p.Name)
+			}
+			p.mu.Unlock()
 		}
-		s.mu.RUnlock()
-		needsPassword = !occupied
+		room.mu.RUnlock()
+	}
+	s.mu.RUnlock()
+
+	if roomPassword != "" && peerCount == 0 {
+		needsPassword = true
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"needsPassword": needsPassword,
+		"peerCount":     peerCount,
+		"peerNames":     peerNames,
 	})
 }

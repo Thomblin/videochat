@@ -8,55 +8,126 @@
 </head>
 <body>
   <header>
-    <h1>📹 Video Chat</h1>
+    <h1><a href="/" id="title-link">📹 Video Chat</a></h1>
     <span class="room-info">
       Room: <strong id="room-name"></strong>
-      — <a href="#" id="copy-link" onclick="copyLink(event)">copy invite link</a>
+      — <a href="#" id="copy-link">copy invite link</a>
     </span>
   </header>
 
   <div id="landing">
-    <h2>Ready to join?</h2>
-    <input id="name-input" type="text" placeholder="Your name (optional)" maxlength="32"
-           onkeydown="if(event.key==='Enter') joinRoom()">
-    <input id="password-input" type="password" placeholder="Room password" maxlength="64"
-           onkeydown="if(event.key==='Enter') joinRoom()" class="hidden">
-    <p class="note">Camera &amp; mic access will be requested.<br>You can join without them if denied.</p>
-    <p id="error-msg" class="note" style="color:#e74c3c;display:none"></p>
-    <button id="join-btn" onclick="joinRoom()">Join Room</button>
+    <div id="room-picker" class="hidden">
+      <h2>Join a room</h2>
+      <input id="room-input" type="text" placeholder="Room name (e.g. family)" maxlength="64">
+      <p id="room-error" class="note" style="color:#e74c3c;display:none"></p>
+      <button id="room-go-btn">Go</button>
+      <p class="note">Leave empty for a random room</p>
+      <div id="room-history" class="hidden">
+        <h3>Recent rooms</h3>
+        <div class="room-history-list"></div>
+      </div>
+    </div>
+
+    <div id="room-join">
+      <h2>Ready to join?</h2>
+      <div id="lobby-info" class="note" style="display:none"></div>
+      <input id="password-input" type="password" placeholder="Room password" maxlength="64" class="hidden">
+
+      <div id="preview-area" class="hidden">
+        <div id="preview-header">
+          <button id="preview-close-btn" title="Close preview">✕</button>
+        </div>
+        <video id="preview-video" autoplay playsinline muted></video>
+        <div id="preview-controls" class="hidden">
+          <button id="preview-mic-btn">🎤 Mic On</button>
+          <button id="preview-cam-btn">📷 Cam On</button>
+          <div class="device-selectors">
+            <select id="audio-input-select" title="Microphone"></select>
+            <select id="video-input-select" title="Camera"></select>
+          </div>
+        </div>
+      </div>
+      <button id="preview-btn" class="secondary-btn">Preview Camera</button>
+
+      <p class="note">Camera &amp; mic access will be requested.<br>You can join without them if denied.</p>
+      <p id="error-msg" class="note" style="color:#e74c3c;display:none"></p>
+      <div id="join-row">
+        <input id="name-input-inline" type="text" placeholder="Your name" maxlength="32">
+        <button id="join-btn">Join Room</button>
+      </div>
+    </div>
   </div>
 
   <div id="main" class="hidden">
-    <div id="video-area">
-      <div id="video-grid"></div>
-      <div id="screen-layout" class="hidden">
-        <div id="screen-featured">
-          <video id="screen-video" autoplay playsinline muted></video>
-          <div class="video-label" id="screen-label"></div>
-        </div>
-        <div id="tile-strip"></div>
-      </div>
+    <div id="reconnect-banner" class="hidden">
+      <span class="reconnect-text"></span>
+      <button class="reconnect-retry hidden">Retry</button>
     </div>
-    <div id="chat-panel" class="hidden">
-      <div id="chat-header">
-        <span>💬 Chat</span>
-        <button id="chat-close" onclick="toggleChat()" title="Close chat">✕</button>
+    <div id="content-row">
+      <div id="video-area">
+        <div id="video-grid"></div>
+        <div id="screen-layout" class="hidden">
+          <div id="screen-featured">
+            <video id="screen-video" autoplay playsinline muted></video>
+            <div class="video-label" id="screen-label"></div>
+          </div>
+          <div id="tile-strip"></div>
+        </div>
       </div>
-      <div id="chat-messages"></div>
-      <div id="chat-form">
-        <input id="chat-input" type="text" placeholder="Message…" maxlength="500"
-               onkeydown="if(event.key==='Enter') sendChat()">
-        <button id="chat-send" onclick="sendChat()">Send</button>
+      <div id="chat-panel" class="hidden">
+        <div id="chat-header">
+          <span>💬 Chat</span>
+          <div>
+            <button id="chat-download" title="Download chat">💾</button>
+            <button id="chat-close" title="Close chat">✕</button>
+          </div>
+        </div>
+        <div id="chat-messages"></div>
+        <div id="chat-form">
+          <input id="chat-input" type="text" placeholder="Message…" maxlength="500">
+          <button id="chat-send">Send</button>
+        </div>
       </div>
     </div>
   </div>
 
   <div id="toolbar">
-    <button id="btn-mic" onclick="toggleMic()">🎤<span class="btn-label"> Mute</span></button>
-    <button id="btn-cam" onclick="toggleCam()">📷<span class="btn-label"> Hide</span></button>
-    <button id="btn-screen" onclick="toggleScreenShare()">🖥️<span class="btn-label"> Share</span></button>
-    <button id="btn-chat" onclick="toggleChat()">💬<span class="btn-label"> Chat</span><span id="chat-badge"></span></button>
-    <button onclick="leaveRoom()">🚪<span class="btn-label"> Leave</span></button>
+    <button id="btn-mic">🎤<span class="btn-label"> Mute</span></button>
+    <button id="btn-cam">📷<span class="btn-label"> Hide</span></button>
+    <button id="btn-screen">🖥️<span class="btn-label"> Share</span></button>
+    <button id="btn-chat">💬<span class="btn-label"> Chat</span><span id="chat-badge"></span></button>
+    <button id="btn-hand">✋<span class="btn-label"> Hand</span></button>
+    <button id="btn-heart" class="mobile-only">❤️</button>
+    <button id="btn-settings">⚙️<span class="btn-label"> Settings</span></button>
+    <div class="reaction-bar">
+      <button class="reaction-btn" data-emoji="👍">👍</button>
+      <button class="reaction-btn" data-emoji="❤️">❤️</button>
+      <button class="reaction-btn" data-emoji="😂">😂</button>
+      <button class="reaction-btn" data-emoji="👏">👏</button>
+    </div>
+    <button id="btn-leave">🚪<span class="btn-label"> Leave</span></button>
+  </div>
+
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Settings</h3>
+        <button id="settings-close" class="modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <label class="setting-label">Microphone</label>
+        <select id="setting-audio-input"></select>
+        <label class="setting-label">Camera</label>
+        <select id="setting-video-input"></select>
+        <label class="setting-label">Video quality</label>
+        <select id="setting-quality">
+          <option value="auto">Auto (adapt to network)</option>
+          <option value="high">High quality</option>
+          <option value="low">Low quality (save bandwidth)</option>
+          <option value="speaker">Show active speaker only</option>
+        </select>
+      </div>
+    </div>
   </div>
 
 <script src="/app.js"></script>

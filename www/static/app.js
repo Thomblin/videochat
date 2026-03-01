@@ -447,10 +447,10 @@ function connectSignaling() {
     hideReconnectBanner();
     reconnectAttempts = 0;
 
-    // Send auth if password-protected
-    const passwordVal = document.getElementById('password-input').value;
-    if (passwordVal) {
-      ws.send(JSON.stringify({ type: 'auth', password: passwordVal }));
+    // Send auth if room requires password (field is visible)
+    const passwordEl = document.getElementById('password-input');
+    if (!passwordEl.classList.contains('hidden')) {
+      ws.send(JSON.stringify({ type: 'auth', password: passwordEl.value }));
     }
   };
 

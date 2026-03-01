@@ -332,12 +332,14 @@ describe('app.js', () => {
         }
       };
 
-      document.getElementById('password-input').value = 'secret123';
+      const pwEl = document.getElementById('password-input');
+      pwEl.value = 'secret123';
+      pwEl.classList.remove('hidden');
       window.connectSignaling();
       expect(lastUrl).not.toContain('password=');
     });
 
-    test('sends auth message on open when password is set', async () => {
+    test('sends auth message on open when password field is visible', async () => {
       let sentMessages = [];
       window.WebSocket = class {
         constructor(url) {
@@ -352,7 +354,9 @@ describe('app.js', () => {
         }
       };
 
-      document.getElementById('password-input').value = 'secret123';
+      const pwEl = document.getElementById('password-input');
+      pwEl.value = 'secret123';
+      pwEl.classList.remove('hidden');
       window.connectSignaling();
 
       // Wait for onopen to fire
@@ -360,6 +364,57 @@ describe('app.js', () => {
       const authMsg = sentMessages.find(m => m.type === 'auth');
       expect(authMsg).toBeTruthy();
       expect(authMsg.password).toBe('secret123');
+    });
+
+    test('sends auth with empty password when field is visible but empty', async () => {
+      let sentMessages = [];
+      window.WebSocket = class {
+        constructor(url) {
+          this.url = url;
+          this.send = vi.fn(msg => sentMessages.push(JSON.parse(msg)));
+          this.close = vi.fn();
+          this.readyState = 1;
+          this.onopen = null;
+          this.onmessage = null;
+          this.onclose = null;
+          setTimeout(() => { if (this.onopen) this.onopen(); }, 0);
+        }
+      };
+
+      const pwEl = document.getElementById('password-input');
+      pwEl.value = '';
+      pwEl.classList.remove('hidden');
+      window.connectSignaling();
+
+      await new Promise(r => setTimeout(r, 10));
+      const authMsg = sentMessages.find(m => m.type === 'auth');
+      expect(authMsg).toBeTruthy();
+      expect(authMsg.password).toBe('');
+    });
+
+    test('does not send auth when password field is hidden', async () => {
+      let sentMessages = [];
+      window.WebSocket = class {
+        constructor(url) {
+          this.url = url;
+          this.send = vi.fn(msg => sentMessages.push(JSON.parse(msg)));
+          this.close = vi.fn();
+          this.readyState = 1;
+          this.onopen = null;
+          this.onmessage = null;
+          this.onclose = null;
+          setTimeout(() => { if (this.onopen) this.onopen(); }, 0);
+        }
+      };
+
+      const pwEl = document.getElementById('password-input');
+      pwEl.value = '';
+      pwEl.classList.add('hidden');
+      window.connectSignaling();
+
+      await new Promise(r => setTimeout(r, 10));
+      const authMsg = sentMessages.find(m => m.type === 'auth');
+      expect(authMsg).toBeUndefined();
     });
   });
 

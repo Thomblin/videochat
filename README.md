@@ -18,7 +18,6 @@ Peer-to-peer video chat in the browser. Go signaling server + vanilla HTML/JS â€
 - Room picker with history tiles and live participant counts
 - Lobby showing who's in the room before joining
 - Audio/video preview before joining
-- Notification sounds for joins and chat (when tab is in background)
 - WebSocket reconnection with exponential backoff
 - ICE restart on connection failure
 - Auto-reconnect on network change (WiFi/cellular switch)

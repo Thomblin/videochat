@@ -476,25 +476,11 @@ describe('app.js', () => {
     });
   });
 
-  describe('leave confirmation', () => {
-    test('leaveRoom does not proceed when confirm is cancelled', () => {
-      window.confirm = vi.fn(() => false);
-      // Landing should stay hidden if leaveRoom is aborted
+  describe('leave room', () => {
+    test('leaveRoom cleans up and shows landing page', () => {
       const landing = document.getElementById('landing');
       landing.classList.add('hidden');
       window.leaveRoom();
-      expect(window.confirm).toHaveBeenCalledWith('Leave the room?');
-      // Landing still hidden means leaveRoom did not proceed
-      expect(landing.classList.contains('hidden')).toBe(true);
-    });
-
-    test('leaveRoom proceeds when confirm is accepted', () => {
-      window.confirm = vi.fn(() => true);
-      const landing = document.getElementById('landing');
-      landing.classList.add('hidden');
-      window.leaveRoom();
-      expect(window.confirm).toHaveBeenCalled();
-      // Landing is shown after leaving
       expect(landing.classList.contains('hidden')).toBe(false);
     });
   });

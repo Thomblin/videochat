@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -30,6 +31,17 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"iceServers":` + iceServers + `}`))
 }
 
+// tlsErrorFilter suppresses expected TLS handshake errors from browsers
+// that haven't accepted the self-signed certificate yet.
+type tlsErrorFilter struct{}
+
+func (f *tlsErrorFilter) Write(p []byte) (n int, err error) {
+	if strings.Contains(string(p), "TLS handshake error") {
+		return len(p), nil
+	}
+	return os.Stderr.Write(p)
+}
+
 // securityHeaders wraps an http.Handler to add standard security headers.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +49,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws:; media-src 'self' blob:; frame-ancestors 'none'")
+		w.Header().Set("Cache-Control", "no-cache")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -127,7 +140,10 @@ func main() {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	srv := &http.Server{Handler: handler}
+	srv := &http.Server{
+		Handler:  handler,
+		ErrorLog: log.New(&tlsErrorFilter{}, "", 0),
+	}
 	go func() {
 		<-shutdownCh
 		log.Println("Shutting down...")

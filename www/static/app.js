@@ -1262,7 +1262,6 @@ function toggleCam() {
 }
 
 function leaveRoom() {
-  if (!confirm('Leave the room?')) return;
   intentionalLeave = true;
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (screenStream) stopScreenShare();
@@ -1488,7 +1487,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-cam')?.addEventListener('click', toggleCam);
   document.getElementById('btn-screen')?.addEventListener('click', toggleScreenShare);
   document.getElementById('btn-chat')?.addEventListener('click', toggleChat);
-  document.getElementById('btn-leave')?.addEventListener('click', leaveRoom);
+  document.getElementById('btn-leave')?.addEventListener('click', () => { location.href = '/'; });
   document.getElementById('btn-hand')?.addEventListener('click', toggleHand);
   document.getElementById('btn-heart')?.addEventListener('click', () => sendReaction('❤️'));
   document.getElementById('btn-settings')?.addEventListener('click', toggleSettings);
@@ -1541,7 +1540,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Warn before closing/navigating away while in a room
   window.addEventListener('beforeunload', (e) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (!intentionalLeave && ws && ws.readyState === WebSocket.OPEN) {
       e.preventDefault();
     }
   });

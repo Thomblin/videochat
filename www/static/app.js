@@ -1262,6 +1262,7 @@ function toggleCam() {
 }
 
 function leaveRoom() {
+  if (!confirm('Leave the room?')) return;
   intentionalLeave = true;
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (screenStream) stopScreenShare();
@@ -1536,6 +1537,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (localStream) localStream.getVideoTracks().forEach(t => t.enabled = camEnabled);
     const btn = document.getElementById('preview-cam-btn');
     btn.textContent = camEnabled ? '📷 Cam On' : '📷 Cam Off';
+  });
+
+  // Warn before closing/navigating away while in a room
+  window.addEventListener('beforeunload', (e) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      e.preventDefault();
+    }
   });
 
   // Init

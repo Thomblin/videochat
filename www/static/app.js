@@ -34,6 +34,7 @@ let guestCounter = 0;
 const guestNumbers = {};
 
 let audioCtx = null;
+let localAnalyser = null;
 
 // ── Room history ─────────────────────────────────────────────────────────────
 
@@ -377,6 +378,16 @@ async function joinRoom() {
     try { audioCtx = new AudioContext(); } catch (e) {}
   } else if (audioCtx.state === 'suspended') {
     audioCtx.resume();
+  }
+
+  // Set up local mic analyser for speaking detection
+  if (audioCtx && localStream && localStream.getAudioTracks().length > 0) {
+    try {
+      const source = audioCtx.createMediaStreamSource(localStream);
+      localAnalyser = audioCtx.createAnalyser();
+      localAnalyser.fftSize = 256;
+      source.connect(localAnalyser);
+    } catch (e) {}
   }
 
   intentionalLeave = false;
@@ -1281,6 +1292,7 @@ function leaveRoom() {
   hasMic = false;
   if (speakerCheckInterval) { clearInterval(speakerCheckInterval); speakerCheckInterval = null; }
   currentSpeaker = null;
+  localAnalyser = null;
   updateChatBadge();
   document.getElementById('chat-messages').innerHTML = '';
   document.getElementById('chat-panel').classList.add('hidden');
@@ -1400,6 +1412,19 @@ function startSpeakerDetection() {
       } catch (e) {}
     }
 
+    // Check local mic level
+    if (localStream && micEnabled && localAnalyser) {
+      const data = new Uint8Array(localAnalyser.fftSize);
+      localAnalyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) {
+        const v = (data[i] - 128) / 128;
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / data.length);
+      if (rms > 0.01) speakingPeers.add('local');
+    }
+
     // Update speaking indicators on all peer tiles
     document.querySelectorAll('#video-grid .video-container').forEach(el => {
       const id = el.id.replace('video-', '');
@@ -1411,6 +1436,17 @@ function startSpeakerDetection() {
           icon.textContent = '🔊';
           icon.title = 'Speaking';
           el.appendChild(icon);
+        }
+        // Auto-lower raised hand when speaking
+        const handEl = el.querySelector('.hand-indicator');
+        if (handEl) {
+          handEl.remove();
+          // If it's our own hand, also reset state and broadcast
+          if (id === 'local' || id === myId) {
+            handRaised = false;
+            document.getElementById('btn-hand').classList.remove('active');
+            broadcastToAll({ type: 'reaction', emoji: '✋', raised: false });
+          }
         }
       } else if (indicator) {
         indicator.remove();

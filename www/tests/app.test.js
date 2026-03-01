@@ -448,6 +448,38 @@ describe('app.js', () => {
       window.handleReaction('peer-hand', '✋', false);
       expect(container.querySelector('.hand-indicator')).toBeNull();
     });
+
+    test('hand indicator on local video is removed when speaking detected', () => {
+      // Set up local video container with hand raised
+      const container = document.createElement('div');
+      container.id = 'video-local';
+      container.className = 'video-container';
+      document.getElementById('video-grid').appendChild(container);
+
+      window.handleReaction('local', '✋', true);
+      expect(container.querySelector('.hand-indicator')).not.toBeNull();
+
+      // Simulate speaking detection removing the hand
+      const handEl = container.querySelector('.hand-indicator');
+      handEl.remove();
+
+      expect(container.querySelector('.hand-indicator')).toBeNull();
+    });
+
+    test('hand indicator on remote peer is removed when speaking detected', () => {
+      const container = document.createElement('div');
+      container.id = 'video-peer-speak';
+      container.className = 'video-container';
+      document.getElementById('video-grid').appendChild(container);
+
+      // Raise hand
+      window.handleReaction('peer-speak', '✋', true);
+      expect(container.querySelector('.hand-indicator')).not.toBeNull();
+
+      // Speaking detection calls handleReaction with raised=false
+      window.handleReaction('peer-speak', '✋', false);
+      expect(container.querySelector('.hand-indicator')).toBeNull();
+    });
   });
 
   describe('settings', () => {

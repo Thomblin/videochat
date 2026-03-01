@@ -1613,6 +1613,11 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('password-input')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') joinRoom();
   });
+  document.getElementById('password-input')?.addEventListener('focus', () => {
+    setTimeout(() => {
+      document.getElementById('password-input')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }, 300);
+  });
 
   // Device selectors
   document.getElementById('audio-input-select')?.addEventListener('change', () => switchDevice('audio'));
